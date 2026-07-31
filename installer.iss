@@ -19,7 +19,7 @@
 ; press F9 in Inno Setup) to rebuild the installer afterward.
 
 #define MyAppName "PC Build Companion"
-#define MyAppVersion "1.0"
+#define MyAppVersion "1.0.0"
 #define MyAppExeName "PCBuildCompanion.exe"
 
 ; Path to the published output. Adjust if your publish folder differs.
@@ -56,4 +56,4 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall
