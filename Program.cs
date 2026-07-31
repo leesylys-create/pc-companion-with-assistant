@@ -27,6 +27,14 @@ namespace PCBuildCompanion
 
     public class MainForm : Form
     {
+        // Bump this with every release you publish on GitHub. Must match the
+        // tag name of the GitHub release (tags like "1.0.0" or "v1.0.0" both work).
+        private const string AppVersion = "1.0.0";
+
+        // Your GitHub repo, used only to check for newer releases on startup.
+        private const string UpdateRepoOwner = "leesylys-create";
+        private const string UpdateRepoName = "pc-companion-with-assistant";
+
         private const string PcPartPickerUrl = "https://pcpartpicker.com/";
         private const string BuildCoresUrl = "https://buildcores.com/";
 
@@ -58,6 +66,16 @@ namespace PCBuildCompanion
         private readonly Label _errorTitleLabel = new();
         private readonly Label _errorDetailLabel = new();
         private readonly Button _openExternalBtn = new();
+
+        // Update banner controls (shown at the top when a newer GitHub release exists)
+        private readonly Panel _updateBanner = new();
+        private readonly Label _updateBannerLabel = new();
+        private readonly LinkLabel _updateBannerLink = new();
+        private readonly Button _updateBannerDismissBtn = new();
+        private string _updateReleaseUrl = "";
+        private string _downloadedInstallerPath = "";
+        private bool _updateDownloadInProgress = false;
+        private bool _updateReadyToInstall = false;
 
         // Parts panel controls (paste-and-copy helper, no automation of either site)
         private readonly Button _partsPanelToggleBtn = new();
@@ -131,6 +149,7 @@ namespace PCBuildCompanion
             TrySetWindowIcon();
 
             BuildTopBar();
+            BuildUpdateBanner();
             BuildErrorOverlay();
             BuildWebView();
             BuildPartsPanel();
@@ -142,8 +161,10 @@ namespace PCBuildCompanion
             Controls.Add(_errorOverlay);
             Controls.Add(_partsPanel);
             Controls.Add(_aiPanel);
+            Controls.Add(_updateBanner);
             Controls.Add(_topBar);
             _topBar.BringToFront();
+            _updateBanner.BringToFront();
             _partsPanel.BringToFront();
             _aiPanel.BringToFront();
 
@@ -151,6 +172,247 @@ namespace PCBuildCompanion
             LoadAiSettings();
 
             Load += MainForm_Load;
+        }
+
+        private void BuildUpdateBanner()
+        {
+            _updateBanner.Dock = DockStyle.Top;
+            _updateBanner.Height = 36;
+            _updateBanner.BackColor = Color.FromArgb(61, 126, 255);
+            _updateBanner.Visible = false;
+            _updateBanner.Padding = new Padding(12, 0, 12, 0);
+
+            _updateBannerLabel.AutoSize = false;
+            _updateBannerLabel.Text = "A new version is available.";
+            _updateBannerLabel.ForeColor = Color.White;
+            _updateBannerLabel.Font = new Font("Segoe UI", 9.5F, FontStyle.Bold);
+            _updateBannerLabel.TextAlign = ContentAlignment.MiddleLeft;
+            _updateBannerLabel.Dock = DockStyle.Left;
+            _updateBannerLabel.Width = 190;
+
+            _updateBannerLink.AutoSize = true;
+            _updateBannerLink.Text = "View the release";
+            _updateBannerLink.LinkColor = Color.White;
+            _updateBannerLink.ActiveLinkColor = Color.White;
+            _updateBannerLink.VisitedLinkColor = Color.White;
+            _updateBannerLink.Font = new Font("Segoe UI", 9.5F, FontStyle.Underline);
+            _updateBannerLink.TextAlign = ContentAlignment.MiddleLeft;
+            _updateBannerLink.Dock = DockStyle.Left;
+            _updateBannerLink.LinkClicked += (s, e) => OnUpdateBannerLinkClicked();
+
+            _updateBannerDismissBtn.Text = "\u2715";
+            _updateBannerDismissBtn.Dock = DockStyle.Right;
+            _updateBannerDismissBtn.Width = 34;
+            _updateBannerDismissBtn.FlatStyle = FlatStyle.Flat;
+            _updateBannerDismissBtn.FlatAppearance.BorderSize = 0;
+            _updateBannerDismissBtn.FlatAppearance.MouseOverBackColor = Color.FromArgb(80, 140, 255);
+            _updateBannerDismissBtn.BackColor = Color.FromArgb(61, 126, 255);
+            _updateBannerDismissBtn.ForeColor = Color.White;
+            _updateBannerDismissBtn.Cursor = Cursors.Hand;
+            _updateBannerDismissBtn.Click += (s, e) => _updateBanner.Visible = false;
+
+            _updateBanner.Controls.Add(_updateBannerLink);
+            _updateBanner.Controls.Add(_updateBannerLabel);
+            _updateBanner.Controls.Add(_updateBannerDismissBtn);
+        }
+
+        private void OnUpdateBannerLinkClicked()
+        {
+            // Three possible states depending on how far the update has progressed:
+            if (_updateReadyToInstall && !string.IsNullOrEmpty(_downloadedInstallerPath))
+            {
+                LaunchInstallerAndExit();
+            }
+            else if (!_updateDownloadInProgress && !string.IsNullOrEmpty(_updateReleaseUrl))
+            {
+                // Fallback: if the auto-download hasn't kicked in yet or failed,
+                // clicking the link just opens the release page instead.
+                try { Process.Start(new ProcessStartInfo(_updateReleaseUrl) { UseShellExecute = true }); }
+                catch { /* best effort */ }
+            }
+        }
+
+        private void LaunchInstallerAndExit()
+        {
+            try
+            {
+                var psi = new ProcessStartInfo(_downloadedInstallerPath)
+                {
+                    // /VERYSILENT + /SUPPRESSMSGBOXES: no install wizard UI at all.
+                    // /NORESTART: never reboot the machine on our behalf.
+                    // Inno Setup's own [Run] "Launch after install" step (already in
+                    // installer.iss) reopens the app once the silent install finishes.
+                    Arguments = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART",
+                    UseShellExecute = true
+                };
+                Process.Start(psi);
+                Application.Exit();
+            }
+            catch
+            {
+                // If launching the installer fails for any reason, fall back to just
+                // opening the release page so the person can update manually instead.
+                if (!string.IsNullOrEmpty(_updateReleaseUrl))
+                {
+                    try { Process.Start(new ProcessStartInfo(_updateReleaseUrl) { UseShellExecute = true }); }
+                    catch { /* best effort */ }
+                }
+            }
+        }
+
+        private static bool IsNewerVersion(string latestTag, string currentVersion)
+        {
+            // Tags are sometimes prefixed with "v" (e.g. "v1.0.0") — strip it if present.
+            string Clean(string s) => s.TrimStart('v', 'V').Trim();
+
+            var latestParts = Clean(latestTag).Split('.', '-');
+            var currentParts = Clean(currentVersion).Split('.', '-');
+
+            for (int i = 0; i < Math.Max(latestParts.Length, currentParts.Length); i++)
+            {
+                int latestNum = i < latestParts.Length && int.TryParse(latestParts[i], out var l) ? l : 0;
+                int currentNum = i < currentParts.Length && int.TryParse(currentParts[i], out var c) ? c : 0;
+
+                if (latestNum != currentNum) return latestNum > currentNum;
+            }
+            return false;
+        }
+
+        private async Task CheckForUpdatesAsync()
+        {
+            try
+            {
+                var request = new HttpRequestMessage(
+                    HttpMethod.Get,
+                    $"https://api.github.com/repos/{UpdateRepoOwner}/{UpdateRepoName}/releases/latest");
+
+                // GitHub's API requires a User-Agent header on every request, and this
+                // stays a lightweight, read-only, unauthenticated call (no API key needed).
+                request.Headers.UserAgent.ParseAdd("PCBuildCompanion-UpdateChecker");
+                request.Headers.Accept.ParseAdd("application/vnd.github+json");
+
+                using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(6));
+                var response = await _httpClient.SendAsync(request, cts.Token);
+                if (!response.IsSuccessStatusCode) return;
+
+                var json = await response.Content.ReadAsStringAsync(cts.Token);
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+
+                if (!root.TryGetProperty("tag_name", out var tagNameEl)) return;
+                var tagName = tagNameEl.GetString();
+                if (string.IsNullOrWhiteSpace(tagName)) return;
+
+                var releaseUrl = root.TryGetProperty("html_url", out var htmlUrlEl)
+                    ? htmlUrlEl.GetString() ?? ""
+                    : $"https://github.com/{UpdateRepoOwner}/{UpdateRepoName}/releases/latest";
+
+                if (!IsNewerVersion(tagName, AppVersion)) return;
+
+                // Find the .exe asset attached to the release (the Inno Setup installer).
+                string? assetDownloadUrl = null;
+                string assetFileName = "PCBuildCompanion-Setup.exe";
+                if (root.TryGetProperty("assets", out var assetsEl) && assetsEl.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var asset in assetsEl.EnumerateArray())
+                    {
+                        var name = asset.TryGetProperty("name", out var nameEl) ? nameEl.GetString() ?? "" : "";
+                        if (!name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) continue;
+
+                        assetDownloadUrl = asset.TryGetProperty("browser_download_url", out var urlEl)
+                            ? urlEl.GetString()
+                            : null;
+                        assetFileName = name;
+                        break; // first .exe asset found — there should only be one
+                    }
+                }
+
+                _updateReleaseUrl = releaseUrl;
+
+                if (IsHandleCreated && !IsDisposed)
+                {
+                    BeginInvoke(() =>
+                    {
+                        _updateBannerLabel.Text = $"Downloading version {tagName}\u2026";
+                        _updateBanner.Visible = true;
+                    });
+                }
+
+                if (string.IsNullOrEmpty(assetDownloadUrl))
+                {
+                    // No .exe attached to the release — fall back to a manual "view release" link.
+                    if (IsHandleCreated && !IsDisposed)
+                    {
+                        BeginInvoke(() =>
+                        {
+                            _updateBannerLabel.Text = $"Version {tagName} is available (you have {AppVersion}).";
+                            _updateBannerLink.Text = "View the release";
+                        });
+                    }
+                    return;
+                }
+
+                await DownloadUpdateInstallerAsync(assetDownloadUrl!, assetFileName, tagName);
+            }
+            catch
+            {
+                // Update checks are best-effort only — no internet, GitHub being down, or
+                // rate limiting should never block or interrupt using the app itself.
+            }
+        }
+
+        private async Task DownloadUpdateInstallerAsync(string downloadUrl, string fileName, string tagName)
+        {
+            _updateDownloadInProgress = true;
+            try
+            {
+                var tempPath = Path.Combine(Path.GetTempPath(), "PCBuildCompanionUpdate");
+                Directory.CreateDirectory(tempPath);
+                var destPath = Path.Combine(tempPath, fileName);
+
+                using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromMinutes(5));
+
+                // GitHub redirects asset downloads to a signed S3-style URL; HttpClient
+                // follows redirects by default, so a plain GET here is sufficient.
+                using var response = await _httpClient.GetAsync(downloadUrl, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+                if (!response.IsSuccessStatusCode) return;
+
+                await using (var fileStream = new FileStream(destPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                await using (var httpStream = await response.Content.ReadAsStreamAsync(cts.Token))
+                {
+                    await httpStream.CopyToAsync(fileStream, cts.Token);
+                }
+
+                _downloadedInstallerPath = destPath;
+                _updateReadyToInstall = true;
+
+                if (IsHandleCreated && !IsDisposed)
+                {
+                    BeginInvoke(() =>
+                    {
+                        _updateBannerLabel.Text = $"Version {tagName} downloaded and ready.";
+                        _updateBannerLink.Text = "Restart & install now";
+                        _updateBanner.Visible = true;
+                    });
+                }
+            }
+            catch
+            {
+                // Download failed (no internet mid-download, disk full, etc). Fall back
+                // to showing a manual link to the release page instead of a stuck banner.
+                if (IsHandleCreated && !IsDisposed)
+                {
+                    BeginInvoke(() =>
+                    {
+                        _updateBannerLabel.Text = $"Version {tagName} is available (you have {AppVersion}).";
+                        _updateBannerLink.Text = "View the release";
+                    });
+                }
+            }
+            finally
+            {
+                _updateDownloadInProgress = false;
+            }
         }
 
         private void TrySetWindowIcon()
@@ -1030,6 +1292,10 @@ namespace PCBuildCompanion
         private async void MainForm_Load(object? sender, EventArgs e)
         {
             SetActiveToggle(_pcPartPickerBtn, _buildCoresBtn);
+
+            // Fire-and-forget: check GitHub for a newer release every time the app opens.
+            // This never blocks startup and silently does nothing if it fails.
+            _ = CheckForUpdatesAsync();
 
             try
             {
